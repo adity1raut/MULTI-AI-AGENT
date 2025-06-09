@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useContext } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
-import { Menu, X, Home, MessageSquare, User, LogOut, LogIn, UserPlus, Lock, Shield } from "lucide-react";
+import { Menu, X, Home, MessageSquare, User, LogOut, LogIn, UserPlus, Briefcase, FileText } from "lucide-react";
 import { ToastContainer, toast } from 'react-toastify';
 import 'react-toastify/dist/ReactToastify.css';
 import { AuthContext } from "../context/AuthContext";
@@ -10,24 +10,20 @@ const Sidebar = () => {
   const [isMobile, setIsMobile] = useState(window.innerWidth < 1024);
   const location = useLocation();
   const navigate = useNavigate();
-  const { 
-    user,
-    loading,
-    signOut
-  } = useContext(AuthContext);
+  const { user, loading, logout } = useContext(AuthContext);
 
   // Determine if user is authenticated
   const isAuthenticated = !!user;
-  
-  // Determine user type based on user object properties
-  const isAdmin = user?.role === 'admin' || user?.userType === 'admin';
-  const isUser = user && !isAdmin;
+
+  // Determine user role based on user object properties
+  const isRequester = user?.role === 'requester';
+  const isApplicant = user?.role === 'applicant';
 
   const isActive = (path) => location.pathname === path;
 
   const handleLogout = async () => {
     try {
-      await signOut();
+      await logout();
       toast.success("Successfully logged out!");
       navigate("/");
       if (isMobile) setIsOpen(false);
@@ -65,9 +61,9 @@ const Sidebar = () => {
         >
           {isOpen ? <X size={24} /> : <Menu size={24} />}
         </button>
-        <span className="text-white text-xl font-bold">PRAVESH</span>
+        <span className="text-white text-xl font-bold">Job Portal</span>
       </div>
-      
+
       {/* Empty space to prevent content from hiding behind fixed header on mobile */}
       <div className="h-16 lg:hidden"></div>
 
@@ -80,7 +76,7 @@ const Sidebar = () => {
       >
         <div className="p-6 border-b border-gray-800 hidden lg:block">
           <Link to="/" className="text-white text-2xl font-bold">
-           PRAVESH
+            Job Portal
           </Link>
         </div>
 
@@ -95,58 +91,86 @@ const Sidebar = () => {
             {/* Navigation Links */}
             <div className="p-4 space-y-2 overflow-y-auto" style={{ maxHeight: "calc(100% - 160px)" }}>
               {/* Home is visible to all users */}
-              <Link
-                to="/home"
-                className={`flex items-center p-3 text-gray-300 hover:bg-gray-800 hover:text-white rounded-lg transition-colors duration-200 ${isActive("/") ? "bg-gray-800 text-white" : ""}`}
-                onClick={handleNavigation}
-              >
-                <Home size={18} className="mr-2" />
-                Home
-              </Link>
 
               {/* Authentication-required links */}
               {isAuthenticated ? (
                 <>
-                  {/* User links */}
-                  {isUser && (
+                  {/* Requester links */}
+                  {isRequester && (
                     <>
                       <Link
-                        to="/chat"
-                        className={`flex items-center p-3 text-gray-300 hover:bg-gray-800 hover:text-white rounded-lg transition-colors duration-200 ${isActive("/chat") ? "bg-gray-800 text-white" : ""}`}
+                        to="/data"
+                        className={`flex items-center p-3 text-gray-300 hover:bg-gray-800 hover:text-white rounded-lg transition-colors duration-200 ${isActive("/home") ? "bg-gray-800 text-white" : ""}`}
                         onClick={handleNavigation}
                       >
-                        <MessageSquare size={18} className="mr-2" />
-                        Chat
+                        <Home size={18} className="mr-2" />
+                        Applicant Data
+                      </Link>
+
+                      <Link
+                        to="/post-job"
+                        className={`flex items-center p-3 text-gray-300 hover:bg-gray-800 hover:text-white rounded-lg transition-colors duration-200 ${isActive("/post-job") ? "bg-gray-800 text-white" : ""}`}
+                        onClick={handleNavigation}
+                      >
+                        <Briefcase size={18} className="mr-2" />
+                        Post a Job
                       </Link>
                       <Link
-                        to="/profile"
-                        className={`flex items-center p-3 text-gray-300 hover:bg-gray-800 hover:text-white rounded-lg transition-colors duration-200 ${isActive("/profile") ? "bg-gray-800 text-white" : ""}`}
+                        to="/my-jobs"
+                        className={`flex items-center p-3 text-gray-300 hover:bg-gray-800 hover:text-white rounded-lg transition-colors duration-200 ${isActive("/my-jobs") ? "bg-gray-800 text-white" : ""}`}
                         onClick={handleNavigation}
                       >
-                        <User size={18} className="mr-2" />
-                        Profile
+                        <FileText size={18} className="mr-2" />
+                        My Job Postings
                       </Link>
                     </>
                   )}
 
-                  {/* Admin links */}
-                  {isAdmin && (
-                    <Link
-                      to="/admin"
-                      className={`flex items-center p-3 text-gray-300 hover:bg-gray-800 hover:text-white rounded-lg transition-colors duration-200 ${isActive("/admin") ? "bg-gray-800 text-white" : ""}`}
-                      onClick={handleNavigation}
-                    >
-                      <Shield size={18} className="mr-2" />
-                      Admin Dashboard
-                    </Link>
+                  {/* Applicant links */}
+                  {isApplicant && (
+                    <>
+                      <Link
+                        to="/dashboard"
+                        className={`flex items-center p-3 text-gray-300 hover:bg-gray-800 hover:text-white rounded-lg transition-colors duration-200 ${isActive("/dashboard") ? "bg-gray-800 text-white" : ""}`}
+                        onClick={handleNavigation}
+                      >
+                        <Briefcase size={18} className="mr-2" />
+                        Dashboard
+                      </Link>
+                      <Link
+                        to="/apply-job"
+                        className={`flex items-center p-3 text-gray-300 hover:bg-gray-800 hover:text-white rounded-lg transition-colors duration-200 ${isActive("/home") ? "bg-gray-800 text-white" : ""}`}
+                        onClick={handleNavigation}
+                      >
+                        <Home size={18} className="mr-2" />
+                        Apply Job
+                      </Link>
+                      <Link
+                        to="/applications"
+                        className={`flex items-center p-3 text-gray-300 hover:bg-gray-800 hover:text-white rounded-lg transition-colors duration-200 ${isActive("/applications") ? "bg-gray-800 text-white" : ""}`}
+                        onClick={handleNavigation}
+                      >
+                        <FileText size={18} className="mr-2" />
+                        My Applications
+                      </Link>
+                    </>
                   )}
+
+                  <Link
+                    to="/profile"
+                    className={`flex items-center p-3 text-gray-300 hover:bg-gray-800 hover:text-white rounded-lg transition-colors duration-200 ${isActive("/profile") ? "bg-gray-800 text-white" : ""}`}
+                    onClick={handleNavigation}
+                  >
+                    <User size={18} className="mr-2" />
+                    Profile
+                  </Link>
 
                   {/* User info display */}
                   {user && (
                     <div className="px-3 py-2 text-gray-400 text-sm border-t border-gray-800 mt-4">
                       <div className="flex items-center">
-                        <User size={16} className="mr-2" />
-                        <span className="truncate">
+                        <User size={20} className="mr-2" />
+                        <span className="truncate font-bold">
                           {user.displayName || user.name || user.email}
                         </span>
                       </div>

@@ -192,18 +192,6 @@ const Login = () => {
                     </Link>
                   </p>
                 </div>
-
-                <div className="text-center text-sm text-gray-400 mt-4">
-                  By continuing, you agree to our{' '}
-                  <Link to="/terms" className="text-blue-400 hover:text-blue-300 hover:underline">
-                    Terms
-                  </Link>{' '}
-                  and{' '}
-                  <Link to="/privacy" className="text-blue-400 hover:text-blue-300 hover:underline">
-                    Privacy Policy
-                  </Link>
-                  .
-                </div>
               </div>
             </div>
           </div>
