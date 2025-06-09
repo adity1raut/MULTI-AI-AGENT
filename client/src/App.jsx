@@ -4,6 +4,8 @@ import { AuthProvider } from './context/AuthContext';
 import Login from './pages/Login';
 import Profile from './pages/Profile';
 import ProtectedRoute from './components/ProtectedRoute';
+import Landing from './pages/LandingPage';
+import SignUp from './pages/SignUp';
 
 const App = () => {
   return (
@@ -11,6 +13,8 @@ const App = () => {
       <Router>
         <Routes>
           <Route path="/login" element={<Login />} />
+          <Route path='/signup' element={<SignUp/>} />
+          <Route path='/home' element={<Landing/>} />
           <Route 
             path="/profile" 
             element={
