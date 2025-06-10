@@ -1,476 +1,487 @@
 import os
-from flask import Flask, request, jsonify
-from flask_cors import CORS
-from werkzeug.utils import secure_filename
-from PyPDF2 import PdfReader
-from docx import Document
+import jwt
+import PyPDF2
 import openai
-from langchain.text_splitter import CharacterTextSplitter
-from langchain_openai import OpenAIEmbeddings  # Updated import
-from langchain_community.vectorstores import FAISS
-from langchain.chains.question_answering import load_qa_chain
-from langchain_openai import OpenAI  # Updated import
-from dotenv import load_dotenv
-from sqlalchemy import create_engine, Column, String, Integer, Text, JSON
-from sqlalchemy.orm import declarative_base, sessionmaker
-import re
+from flask import Flask, request, jsonify
+from werkzeug.utils import secure_filename
+from functools import wraps
+import tempfile
+from datetime import datetime
+import uuid
+from typing import List, Dict, Any
+import firebase_admin
+from firebase_admin import credentials, firestore
 import json
-from collections import Counter
-
-# Load environment variables
-load_dotenv()
 
 # Initialize Flask app
 app = Flask(__name__)
-CORS(app)
 
-# Configure upload folder
+# Configuration
 UPLOAD_FOLDER = 'uploads'
-os.makedirs(UPLOAD_FOLDER, exist_ok=True)
-app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
+ALLOWED_EXTENSIONS = {'pdf'}
+MAX_FILE_SIZE = 5 * 1024 * 1024  # 5MB
 
-# Database setup
-Base = declarative_base()
-engine = create_engine(os.getenv('DATABASE_URL'))
-Session = sessionmaker(bind=engine)
+# OpenAI Configuration
+openai.api_key = os.getenv('OPENAI_API_KEY')
 
-class Resume(Base):
-    __tablename__ = 'resumes'
-    id = Column(Integer, primary_key=True)
-    name = Column(String(100))
-    email = Column(String(100))
-    phone = Column(String(20))
-    technical_skills = Column(JSON)  # Store as JSON for better structure
-    soft_skills = Column(JSON)
-    programming_languages = Column(JSON)
-    frameworks_tools = Column(JSON)
-    certifications = Column(Text)
-    summary = Column(Text)
-    experience_summary = Column(Text)
-    education_summary = Column(Text)
-    raw_text = Column(Text)
-
-# Create tables
-Base.metadata.create_all(engine)
-
-# Initialize OpenAI - Updated approach
-def initialize_openai():
-    """Initialize OpenAI with proper error handling"""
-    api_key = os.getenv('OPENAI_API_KEY')
-    if not api_key:
-        raise ValueError("OPENAI_API_KEY not found in environment variables")
-    
-    # For newer versions of openai, use the client approach
-    try:
-        from openai import OpenAI as OpenAIClient
-        client = OpenAIClient(api_key=api_key)
-        return client
-    except ImportError:
-        # Fallback for older versions
-        openai.api_key = api_key
-        return None
-
-# Initialize OpenAI client
+# Firebase Configuration
 try:
-    openai_client = initialize_openai()
+    # Initialize Firebase Admin SDK
+    # You can either use a service account key file or environment variables
+    if os.getenv('FIREBASE_SERVICE_ACCOUNT_KEY'):
+        # If using environment variable with JSON string
+        service_account_info = json.loads(os.getenv('FIREBASE_SERVICE_ACCOUNT_KEY'))
+        cred = credentials.Certificate(service_account_info)
+    else:
+        # If using service account key file
+        cred = credentials.Certificate('path/to/your/serviceAccountKey.json')
+    
+    firebase_admin.initialize_app(cred)
+    db = firestore.client()
 except Exception as e:
-    print(f"Warning: OpenAI initialization failed: {e}")
-    openai_client = None
+    print(f"Firebase initialization error: {e}")
+    db = None
 
-def extract_text_from_file(filepath):
-    """Extract text from PDF or DOCX files"""
+# Ensure upload directory exists
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+
+def allowed_file(filename):
+    """Check if file extension is allowed"""
+    return '.' in filename and \
+           filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+
+def extract_text_from_pdf(pdf_path: str) -> str:
+    """Extract text content from PDF file"""
     try:
-        if filepath.endswith('.pdf'):
-            reader = PdfReader(filepath)
-            text = "".join([page.extract_text() for page in reader.pages])
-        elif filepath.endswith('.docx'):
-            doc = Document(filepath)
-            text = "\n".join([para.text for para in doc.paragraphs])
-        else:
-            raise ValueError("Unsupported file format")
-        return text
+        with open(pdf_path, 'rb') as file:
+            pdf_reader = PyPDF2.PdfReader(file)
+            text = ""
+            for page in pdf_reader.pages:
+                text += page.extract_text() + "\n"
+        return text.strip()
     except Exception as e:
-        raise Exception(f"Error extracting text from file: {str(e)}")
+        raise Exception(f"Error extracting text from PDF: {str(e)}")
 
-def preprocess_text(text):
-    """Clean and preprocess extracted text"""
-    if not text:
-        return ""
-    # Remove multiple whitespaces
-    text = re.sub(r'\s+', ' ', text)
-    # Remove special characters except those used in contact info
-    text = re.sub(r'[^\w\s@\+\(\)\-\.\,\#\&]', '', text)
-    return text.strip()
-
-def extract_contact_info(text):
-    """Extract name, email, and phone using regex"""
-    if not text:
-        return {'name': None, 'email': None, 'phone': None}
+def chunk_text(text: str, chunk_size: int = 1000, overlap: int = 200) -> List[str]:
+    """Split text into overlapping chunks for better RAG processing"""
+    if len(text) <= chunk_size:
+        return [text]
     
-    # Email extraction
-    email = re.search(r'[\w\.-]+@[\w\.-]+', text)
-    email = email.group(0) if email else None
+    chunks = []
+    start = 0
     
-    # Phone extraction (improved pattern)
-    phone_patterns = [
-        r'(\+?\d{1,3}[\s\-]?\d{3,4}[\s\-]?\d{3,4}[\s\-]?\d{3,4})',
-        r'(\(\d{3}\)\s?\d{3}[\s\-]?\d{4})',
-        r'(\d{10})'
-    ]
-    phone = None
-    for pattern in phone_patterns:
-        match = re.search(pattern, text)
-        if match:
-            phone = match.group(0)
+    while start < len(text):
+        end = start + chunk_size
+        if end > len(text):
+            end = len(text)
+        
+        # Try to break at sentence boundary
+        if end < len(text):
+            last_period = text.rfind('.', start, end)
+            if last_period > start + chunk_size // 2:
+                end = last_period + 1
+        
+        chunks.append(text[start:end].strip())
+        start = end - overlap
+        
+        if start >= len(text):
             break
     
-    # Name extraction (improved - look for patterns before email/phone)
-    lines = text.split('\n')
-    name = None
-    for line in lines[:5]:  # Check first 5 lines
-        line = line.strip()
-        if line and len(line.split()) <= 4 and not re.search(r'[@\+\d]', line):
-            name = line
-            break
-    
-    return {
-        'name': name,
-        'email': email,
-        'phone': phone
-    }
+    return chunks
 
-def create_rag_index(text):
-    """Create a RAG vector index from the resume text"""
-    if not text or len(text.strip()) == 0:
-        raise ValueError("No text content to process")
-    
-    # Check if OpenAI API key is available
-    if not os.getenv('OPENAI_API_KEY'):
-        raise ValueError("OpenAI API key not configured")
-    
-    text_splitter = CharacterTextSplitter(
-        separator="\n",
-        chunk_size=1000,
-        chunk_overlap=200,
-        length_function=len
-    )
-    chunks = text_splitter.split_text(text)
-    
-    if not chunks:
-        raise ValueError("No text chunks created")
-    
+def summarize_with_openai(text_chunks: List[str], job_context: Dict[str, Any]) -> Dict[str, Any]:
+    """Use OpenAI to summarize and extract meaningful information from PDF chunks"""
     try:
-        embeddings = OpenAIEmbeddings()
-        knowledge_base = FAISS.from_texts(chunks, embeddings)
-        return knowledge_base
-    except Exception as e:
-        raise Exception(f"Failed to create embeddings: {str(e)}")
-
-
-
-def extract_comprehensive_info_with_rag(text):
-    """Use RAG to extract comprehensive resume information with focus on skills"""
-    try:
-        # Create vector store
-        knowledge_base = create_rag_index(text)
+        # Combine chunks for context
+        full_text = "\n".join(text_chunks)
         
-        # Comprehensive questions to ask the RAG system
-        questions = [
-            "List all concrete technical skills mentioned (programming languages, software, tools, technologies, frameworks, databases, platforms). Exclude generic phrases like 'I build'. Return as comma-separated values.",
-            "List all soft skills mentioned (leadership, communication, teamwork, etc.). Return as comma-separated values.",
-            "List all programming languages mentioned. Return as comma-separated values.",
-            "List all frameworks, libraries, and development tools mentioned. Return as comma-separated values.",
-            "List all certifications mentioned.",
-            "Summarize work experience in bullet points focusing on key achievements and responsibilities.",
-            "Summarize education background including degrees and institutions.",
-            "List the candidate's top 3 professional achievements.",
-            "What industries has the candidate worked in?",
-            "What is the candidate's apparent experience level (entry-level, mid-level, senior, etc.)?"
-        ]
+        # Create a comprehensive prompt for job description enhancement
+        prompt = f"""
+        You are an expert HR assistant. I have a job posting with the following details:
         
-        # Initialize LLM chain
-        try:
-            llm = OpenAI(temperature=0.1)
-            chain = load_qa_chain(llm, chain_type="stuff")
-        except Exception as e:
-            raise Exception(f"Failed to initialize LLM chain: {str(e)}")
+        Title: {job_context.get('title', 'Not specified')}
+        Company: {job_context.get('company', 'Not specified')}
+        Location: {job_context.get('location', 'Not specified')}
+        Description: {job_context.get('description', 'Not specified')}
         
-        answers = {}
-        for question in questions:
-            try:
-                docs = knowledge_base.similarity_search(question, k=4)
-                if docs:
-                    answer = chain.run(input_documents=docs, question=question)
-                    answers[question] = answer.strip() if answer else "Not available"
-                else:
-                    answers[question] = "Not available"
-            except Exception as e:
-                print(f"Error processing question '{question}': {str(e)}")
-                answers[question] = "Not available"
+        Additionally, I have uploaded a PDF document with the following content:
+        {full_text[:4000]}  # Limit to avoid token limits
         
-        # Process and categorize skills
-        def parse_skills_list(skills_text):
-            if not skills_text or skills_text == "Not available":
-                return []
-            # Clean and split skills
-            skills = [skill.strip().title() for skill in skills_text.split(',') if skill.strip()]
-            # Remove duplicates while preserving order
-            seen = set()
-            return [skill for skill in skills if not (skill in seen or seen.add(skill))][:15]  # Limit to top 15
+        Please analyze this information and provide:
+        1. An enhanced job description that combines the form data with relevant PDF content
+        2. Key requirements extracted from the PDF
+        3. Key responsibilities extracted from the PDF
+        4. Preferred qualifications mentioned in the PDF
+        5. Any salary/compensation information if mentioned
+        6. Any other relevant details from the PDF
         
-        technical_skills = parse_skills_list(answers.get(questions[0], ""))
-        soft_skills = parse_skills_list(answers.get(questions[1], ""))
-        programming_languages = parse_skills_list(answers.get(questions[2], ""))
-        frameworks_tools = parse_skills_list(answers.get(questions[3], ""))
+        Format your response as a JSON object with the following structure:
+        {{
+            "enhanced_description": "Enhanced job description combining form data and PDF content",
+            "key_requirements": ["requirement1", "requirement2", ...],
+            "key_responsibilities": ["responsibility1", "responsibility2", ...],
+            "preferred_qualifications": ["qualification1", "qualification2", ...],
+            "compensation_info": "Any salary or compensation details mentioned",
+            "additional_details": "Any other relevant information",
+            "pdf_summary": "Brief summary of the PDF content"
+        }}
+        """
         
-        # Create structured summary
-        experience_summary = answers.get(questions[5], 'Not available')
-        education_summary = answers.get(questions[6], 'Not available')
-        achievements = answers.get(questions[7], 'Not available')
-        industries = answers.get(questions[8], 'Not available')
-        career_level = answers.get(questions[9], 'Not available')
-        
-        comprehensive_summary = f"""
-## Professional Summary
-Level: {career_level}
-Industries: {industries}
-
-## Technical Skills
-• {", ".join(technical_skills)}
-
-## Work Experience
-{experience_summary}
-
-## Education
-{education_summary}
-
-## Key Achievements
-{achievements}
-        """.strip()
-        
-        return {
-            'technical_skills': technical_skills,
-            'soft_skills': soft_skills,
-            'programming_languages': programming_languages,
-            'frameworks_tools': frameworks_tools,
-            'certifications': answers.get(questions[4], ''),
-            'summary': comprehensive_summary,
-            'experience_summary': experience_summary,
-            'education_summary': education_summary
-        }
-    except Exception as e:
-        print(f"RAG processing failed: {str(e)}")
-        return extract_fallback_skills(text)
-
-def extract_fallback_skills(text):
-    """Fallback skill extraction using regex patterns"""
-    if not text:
-        return {
-            'technical_skills': [],
-            'soft_skills': [],
-            'programming_languages': [],
-            'frameworks_tools': [],
-            'certifications': '',
-            'summary': 'Unable to generate summary due to processing error.',
-            'experience_summary': 'Not available',
-            'education_summary': 'Not available'
-        }
-    
-    # Common skill patterns (expanded list)
-    programming_langs = ['Python', 'Java', 'JavaScript', 'C++', 'C#', 'PHP', 'Ruby', 
-                        'Go', 'Swift', 'Kotlin', 'TypeScript', 'R', 'SQL', 'HTML', 
-                        'CSS', 'Scala', 'Perl', 'Rust', 'Dart']
-    
-    frameworks = ['React', 'Angular', 'Vue', 'Django', 'Flask', 'Spring', 'Express', 
-                 'Laravel', 'Rails', 'Node.js', 'Bootstrap', 'jQuery', '.NET', 
-                 'TensorFlow', 'PyTorch', 'Hadoop', 'Spark']
-    
-    tools = ['Git', 'Docker', 'Kubernetes', 'AWS', 'Azure', 'GCP', 'Jenkins', 
-            'Jira', 'Confluence', 'VS Code', 'IntelliJ', 'Tableau', 'PowerBI', 
-            'PostgreSQL', 'MongoDB', 'MySQL', 'Firebase']
-    
-    soft_skills_list = ['Leadership', 'Communication', 'Teamwork', 'Problem Solving', 
-                       'Project Management', 'Time Management', 'Critical Thinking',
-                       'Adaptability', 'Creativity', 'Attention to Detail']
-    
-    # Find matches in text (case insensitive)
-    text_lower = text.lower()
-    found_programming = [lang for lang in programming_langs if lang.lower() in text_lower]
-    found_frameworks = [fw for fw in frameworks if fw.lower() in text_lower]
-    found_tools = [tool for tool in tools if tool.lower() in text_lower]
-    found_soft_skills = [skill for skill in soft_skills_list if skill.lower() in text_lower]
-    
-    # Create basic summary
-    summary = f"""
-## Technical Skills Found
-• Programming Languages: {', '.join(found_programming)}
-• Frameworks: {', '.join(found_frameworks)}
-• Tools: {', '.join(found_tools)}
-
-## Soft Skills
-• {', '.join(found_soft_skills)}
-    """.strip()
-    
-    return {
-        'technical_skills': found_programming + found_frameworks + found_tools,
-        'soft_skills': found_soft_skills,
-        'programming_languages': found_programming,
-        'frameworks_tools': found_frameworks + found_tools,
-        'certifications': '',
-        'summary': summary,
-        'experience_summary': 'Experience details extracted using pattern matching.',
-        'education_summary': 'Education details not available with current processing.'
-    }
-
-
-
-def store_resume_data(contact_info, comprehensive_results, raw_text):
-    """Store extracted data in database with enhanced structure"""
-    session = Session()
-    try:
-        resume = Resume(
-            name=contact_info.get('name'),
-            email=contact_info.get('email'),
-            phone=contact_info.get('phone'),
-            technical_skills=comprehensive_results.get('technical_skills', []),
-            soft_skills=comprehensive_results.get('soft_skills', []),
-            programming_languages=comprehensive_results.get('programming_languages', []),
-            frameworks_tools=comprehensive_results.get('frameworks_tools', []),
-            certifications=comprehensive_results.get('certifications', ''),
-            summary=comprehensive_results.get('summary', ''),
-            experience_summary=comprehensive_results.get('experience_summary', ''),
-            education_summary=comprehensive_results.get('education_summary', ''),
-            raw_text=raw_text
+        response = openai.ChatCompletion.create(
+            model="gpt-3.5-turbo",
+            messages=[
+                {"role": "system", "content": "You are an expert HR assistant that helps create comprehensive job postings."},
+                {"role": "user", "content": prompt}
+            ],
+            max_tokens=2000,
+            temperature=0.3
         )
         
-        session.add(resume)
-        session.commit()
-        return resume.id
+        # Try to parse the JSON response
+        try:
+            result = json.loads(response.choices[0].message.content)
+        except json.JSONDecodeError:
+            # If JSON parsing fails, create a structured response
+            result = {
+                "enhanced_description": response.choices[0].message.content,
+                "key_requirements": [],
+                "key_responsibilities": [],
+                "preferred_qualifications": [],
+                "compensation_info": "",
+                "additional_details": "",
+                "pdf_summary": "PDF content processed but structured parsing failed"
+            }
+        
+        return result
+        
     except Exception as e:
-        session.rollback()
-        raise e
-    finally:
-        session.close()
+        raise Exception(f"Error processing with OpenAI: {str(e)}")
 
-@app.route('/api/process-resume', methods=['POST'])
-def process_resume():
-    if 'file' not in request.files:
-        return jsonify({'error': 'No file uploaded'}), 400
-    
-    file = request.files['file']
-    if file.filename == '':
-        return jsonify({'error': 'No selected file'}), 400
-    
-    if file and (file.filename.endswith('.pdf') or file.filename.endswith('.docx')):
-        filename = secure_filename(file.filename)
-        filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-        file.save(filepath)
+def token_required(f):
+    """Decorator to verify JWT token and check user role"""
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        token = request.headers.get('Authorization')
+        
+        if not token:
+            return jsonify({'error': 'Token is missing'}), 401
         
         try:
-            # Step 1: Extract text
-            raw_text = extract_text_from_file(filepath)
-            if not raw_text or len(raw_text.strip()) == 0:
-                return jsonify({'error': 'Could not extract text from file'}), 400
+            # Remove 'Bearer ' prefix if present
+            if token.startswith('Bearer '):
+                token = token[7:]
             
-            cleaned_text = preprocess_text(raw_text)
+            # Decode the JWT token (replace with your actual secret)
+            data = jwt.decode(token, os.getenv('JWT_SECRET_KEY', 'your-secret-key'), algorithms=['HS256'])
+            current_user_id = data['user_id']
+            current_user_role = data.get('role')
             
-            # Step 2: Extract contact info
-            contact_info = extract_contact_info(cleaned_text)
+            # Check if user has requester role
+            if current_user_role != 'requester':
+                return jsonify({'error': 'Insufficient permissions. Only requesters can post jobs.'}), 403
             
-            # Step 3: Comprehensive processing with RAG
-            comprehensive_results = extract_comprehensive_info_with_rag(cleaned_text)
+            # Add user info to request context
+            request.current_user_id = current_user_id
+            request.current_user_role = current_user_role
             
-            # Step 4: Store in database
-            resume_id = store_resume_data(contact_info, comprehensive_results, cleaned_text)
+        except jwt.ExpiredSignatureError:
+            return jsonify({'error': 'Token has expired'}), 401
+        except jwt.InvalidTokenError:
+            return jsonify({'error': 'Token is invalid'}), 401
+        except Exception as e:
+            return jsonify({'error': 'Token verification failed'}), 401
+        
+        return f(*args, **kwargs)
+    
+    return decorated
+
+@app.route('/jobs/post', methods=['POST'])
+@token_required
+def post_job():
+    """Handle job posting with optional PDF processing using RAG and OpenAI"""
+    try:
+        if not db:
+            return jsonify({'error': 'Firebase not initialized'}), 500
             
-            # Step 5: Return comprehensive results
-            return jsonify({
-                'id': resume_id,
-                'contact_info': contact_info,
-                'technical_skills': comprehensive_results['technical_skills'],
-                'soft_skills': comprehensive_results['soft_skills'],
-                'programming_languages': comprehensive_results['programming_languages'],
-                'frameworks_tools': comprehensive_results['frameworks_tools'],
-                'certifications': comprehensive_results['certifications'],
-                'summary': comprehensive_results['summary'],
-                'experience_summary': comprehensive_results['experience_summary'],
-                'education_summary': comprehensive_results['education_summary'],
-                'message': 'Resume processed successfully with comprehensive analysis'
+        # Get form data
+        title = request.form.get('title')
+        company = request.form.get('company')
+        location = request.form.get('location')
+        description = request.form.get('description')
+        
+        # Validate required fields
+        if not all([title, company, location, description]):
+            return jsonify({'error': 'All fields (title, company, location, description) are required'}), 400
+        
+        # Initialize job data
+        job_id = str(uuid.uuid4())
+        job_data = {
+            'id': job_id,
+            'title': title,
+            'company': company,
+            'location': location,
+            'description': description,
+            'posted_by': request.current_user_id,
+            'created_at': datetime.utcnow(),
+            'updated_at': datetime.utcnow(),
+            'pdf_processed': False,
+            'ai_enhanced': False,
+            'is_active': True,
+            'enhanced_description': description,
+            'key_requirements': [],
+            'key_responsibilities': [],
+            'preferred_qualifications': [],
+            'compensation_info': '',
+            'additional_details': '',
+            'pdf_summary': ''
+        }
+        
+        pdf_processing_error = None
+        
+        # Check if PDF file is uploaded
+        if 'pdf' in request.files:
+            pdf_file = request.files['pdf']
+            
+            if pdf_file and pdf_file.filename != '':
+                # Validate file
+                if not allowed_file(pdf_file.filename):
+                    return jsonify({'error': 'Invalid file type. Only PDF files are allowed.'}), 400
+                
+                # Check file size
+                pdf_file.seek(0, 2)  # Seek to end
+                file_size = pdf_file.tell()
+                pdf_file.seek(0)  # Reset to beginning
+                
+                if file_size > MAX_FILE_SIZE:
+                    return jsonify({'error': 'File size exceeds 5MB limit'}), 400
+                
+                # Save file temporarily
+                filename = secure_filename(pdf_file.filename)
+                temp_path = os.path.join(tempfile.gettempdir(), f"{job_id}_{filename}")
+                pdf_file.save(temp_path)
+                
+                try:
+                    # Extract text from PDF
+                    pdf_text = extract_text_from_pdf(temp_path)
+                    
+                    if pdf_text.strip():
+                        # Chunk the text for better processing
+                        text_chunks = chunk_text(pdf_text)
+                        
+                        # Process with OpenAI
+                        job_context = {
+                            'title': title,
+                            'company': company,
+                            'location': location,
+                            'description': description
+                        }
+                        
+                        ai_result = summarize_with_openai(text_chunks, job_context)
+                        
+                        # Update job data with AI-enhanced information
+                        job_data.update({
+                            'enhanced_description': ai_result.get('enhanced_description', description),
+                            'key_requirements': ai_result.get('key_requirements', []),
+                            'key_responsibilities': ai_result.get('key_responsibilities', []),
+                            'preferred_qualifications': ai_result.get('preferred_qualifications', []),
+                            'compensation_info': ai_result.get('compensation_info', ''),
+                            'additional_details': ai_result.get('additional_details', ''),
+                            'pdf_summary': ai_result.get('pdf_summary', ''),
+                            'original_pdf_text': pdf_text[:2000],  # Store first 2000 chars
+                            'pdf_processed': True,
+                            'ai_enhanced': True
+                        })
+                    
+                    else:
+                        pdf_processing_error = 'No text could be extracted from the PDF'
+                
+                except Exception as e:
+                    pdf_processing_error = str(e)
+                
+                finally:
+                    # Clean up temporary file
+                    if os.path.exists(temp_path):
+                        os.remove(temp_path)
+        
+        # Save job to Firebase Firestore
+        try:
+            # Add the job document to the 'jobs' collection
+            job_ref = db.collection('jobs').document(job_id)
+            job_ref.set(job_data)
+            
+            # Also add to user's posted jobs collection for easier querying
+            user_jobs_ref = db.collection('users').document(request.current_user_id).collection('posted_jobs').document(job_id)
+            user_jobs_ref.set({
+                'job_id': job_id,
+                'title': title,
+                'company': company,
+                'created_at': job_data['created_at'],
+                'is_active': True
             })
             
         except Exception as e:
-            print(f"Processing error: {str(e)}")  # Add logging
-            return jsonify({'error': f'Processing error: {str(e)}'}), 500
-        finally:
-            # Clean up uploaded file
-            if os.path.exists(filepath):
-                os.remove(filepath)
-    else:
-        return jsonify({'error': 'Invalid file format. Only PDF and DOCX are supported.'}), 400
-
-@app.route('/api/resumes', methods=['GET'])
-def get_resumes():
-    session = Session()
-    try:
-        resumes = session.query(Resume).all()
+            return jsonify({'error': f'Failed to save job to Firebase: {str(e)}'}), 500
         
-        result = []
-        for resume in resumes:
-            result.append({
-                'id': resume.id,
-                'name': resume.name,
-                'email': resume.email,
-                'phone': resume.phone,
-                'technical_skills': resume.technical_skills or [],
-                'soft_skills': resume.soft_skills or [],
-                'programming_languages': resume.programming_languages or [],
-                'frameworks_tools': resume.frameworks_tools or [],
-                'certifications': resume.certifications,
-                'summary': resume.summary,
-                'experience_summary': resume.experience_summary,
-                'education_summary': resume.education_summary
-            })
+        # Return success response
+        response_data = {
+            'message': 'Job posted successfully',
+            'job_id': job_id,
+            'pdf_processed': job_data['pdf_processed'],
+            'ai_enhanced': job_data['ai_enhanced']
+        }
         
-        return jsonify(result)
+        # Add processing warnings if any
+        if pdf_processing_error:
+            response_data['warning'] = f"PDF processing failed: {pdf_processing_error}"
+        
+        return jsonify(response_data), 201
+    
     except Exception as e:
-        return jsonify({'error': f'Database error: {str(e)}'}), 500
-    finally:
-        session.close()
+        return jsonify({'error': f'Job posting failed: {str(e)}'}), 500
 
-@app.route('/api/skills-analytics', methods=['GET'])
-def get_skills_analytics():
-    """New endpoint for skills analytics across all resumes"""
-    session = Session()
+@app.route('/jobs/<job_id>', methods=['GET'])
+@token_required
+def get_job_details(job_id):
+    """Get detailed job information including AI-enhanced content"""
     try:
-        resumes = session.query(Resume).all()
+        if not db:
+            return jsonify({'error': 'Firebase not initialized'}), 500
+            
+        # Get job from Firebase
+        job_ref = db.collection('jobs').document(job_id)
+        job_doc = job_ref.get()
         
-        all_technical_skills = []
-        all_programming_languages = []
-        all_frameworks_tools = []
+        if not job_doc.exists:
+            return jsonify({'error': 'Job not found'}), 404
         
-        for resume in resumes:
-            if resume.technical_skills:
-                all_technical_skills.extend(resume.technical_skills)
-            if resume.programming_languages:
-                all_programming_languages.extend(resume.programming_languages)
-            if resume.frameworks_tools:
-                all_frameworks_tools.extend(resume.frameworks_tools)
+        job_data = job_doc.to_dict()
         
-        # Count frequency of skills
-        technical_skills_count = Counter(all_technical_skills)
-        programming_languages_count = Counter(all_programming_languages)
-        frameworks_tools_count = Counter(all_frameworks_tools)
+        # Convert datetime objects to ISO strings for JSON serialization
+        if 'created_at' in job_data and job_data['created_at']:
+            job_data['created_at'] = job_data['created_at'].isoformat()
+        if 'updated_at' in job_data and job_data['updated_at']:
+            job_data['updated_at'] = job_data['updated_at'].isoformat()
+        
+        return jsonify(job_data), 200
+    
+    except Exception as e:
+        return jsonify({'error': f'Failed to retrieve job details: {str(e)}'}), 500
+
+@app.route('/jobs/my-jobs', methods=['GET'])
+@token_required
+def get_my_jobs():
+    """Get all jobs posted by the current user"""
+    try:
+        if not db:
+            return jsonify({'error': 'Firebase not initialized'}), 500
+            
+        # Query jobs posted by current user
+        jobs_ref = db.collection('jobs').where('posted_by', '==', request.current_user_id).where('is_active', '==', True)
+        jobs = jobs_ref.stream()
+        
+        job_list = []
+        for job in jobs:
+            job_data = job.to_dict()
+            
+            # Convert datetime objects to ISO strings
+            if 'created_at' in job_data and job_data['created_at']:
+                job_data['created_at'] = job_data['created_at'].isoformat()
+            if 'updated_at' in job_data and job_data['updated_at']:
+                job_data['updated_at'] = job_data['updated_at'].isoformat()
+            
+            job_list.append(job_data)
+        
+        # Sort by creation date (most recent first)
+        job_list.sort(key=lambda x: x.get('created_at', ''), reverse=True)
         
         return jsonify({
-            'total_resumes': len(resumes),
-            'most_common_technical_skills': dict(technical_skills_count.most_common(10)),
-            'most_common_programming_languages': dict(programming_languages_count.most_common(10)),
-            'most_common_frameworks_tools': dict(frameworks_tools_count.most_common(10))
-        })
+            'jobs': job_list,
+            'total': len(job_list)
+        }), 200
+    
     except Exception as e:
-        return jsonify({'error': f'Analytics error: {str(e)}'}), 500
-    finally:
-        session.close()
+        return jsonify({'error': f'Failed to retrieve jobs: {str(e)}'}), 500
+
+@app.route('/jobs/<job_id>', methods=['PUT'])
+@token_required
+def update_job(job_id):
+    """Update a job posting"""
+    try:
+        if not db:
+            return jsonify({'error': 'Firebase not initialized'}), 500
+            
+        # Get job from Firebase
+        job_ref = db.collection('jobs').document(job_id)
+        job_doc = job_ref.get()
+        
+        if not job_doc.exists:
+            return jsonify({'error': 'Job not found'}), 404
+        
+        job_data = job_doc.to_dict()
+        
+        # Check if current user is the owner
+        if job_data.get('posted_by') != request.current_user_id:
+            return jsonify({'error': 'Unauthorized to update this job'}), 403
+        
+        # Get update data from request
+        update_data = request.get_json()
+        allowed_fields = ['title', 'company', 'location', 'description', 'is_active']
+        
+        # Update only allowed fields
+        for field in allowed_fields:
+            if field in update_data:
+                job_data[field] = update_data[field]
+        
+        job_data['updated_at'] = datetime.utcnow()
+        
+        # Update in Firebase
+        job_ref.update(job_data)
+        
+        # Convert datetime for response
+        if 'created_at' in job_data and job_data['created_at']:
+            job_data['created_at'] = job_data['created_at'].isoformat()
+        if 'updated_at' in job_data and job_data['updated_at']:
+            job_data['updated_at'] = job_data['updated_at'].isoformat()
+        
+        return jsonify({
+            'message': 'Job updated successfully',
+            'job': job_data
+        }), 200
+    
+    except Exception as e:
+        return jsonify({'error': f'Failed to update job: {str(e)}'}), 500
+
+@app.route('/jobs/<job_id>', methods=['DELETE'])
+@token_required
+def delete_job(job_id):
+    """Soft delete a job posting (set is_active to False)"""
+    try:
+        if not db:
+            return jsonify({'error': 'Firebase not initialized'}), 500
+            
+        # Get job from Firebase
+        job_ref = db.collection('jobs').document(job_id)
+        job_doc = job_ref.get()
+        
+        if not job_doc.exists:
+            return jsonify({'error': 'Job not found'}), 404
+        
+        job_data = job_doc.to_dict()
+        
+        # Check if current user is the owner
+        if job_data.get('posted_by') != request.current_user_id:
+            return jsonify({'error': 'Unauthorized to delete this job'}), 403
+        
+        # Soft delete - set is_active to False
+        job_ref.update({
+            'is_active': False,
+            'updated_at': datetime.utcnow()
+        })
+        
+        return jsonify({'message': 'Job deleted successfully'}), 200
+    
+    except Exception as e:
+        return jsonify({'error': f'Failed to delete job: {str(e)}'}), 500
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    app.run(debug=True, host='0.0.0.0', port=5050)

@@ -65,7 +65,7 @@ const JobPostingForm = () => {
         jobData.append("pdf", pdfFile);
       }
 
-      await apiCall("/jobs/post", {
+      await fetch("http://localhost:5050/jobs/post", {
         method: "POST",
         body: jobData,
       });

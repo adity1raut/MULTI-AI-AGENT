@@ -4,12 +4,13 @@ import { FcGoogle } from 'react-icons/fc';
 import { Link, useNavigate } from 'react-router-dom';
 import { ArrowRight } from 'lucide-react';
 import Sidebar from "../components/Sidebar";
+import { ToastContainer, toast } from 'react-toastify';
+import 'react-toastify/dist/ReactToastify.css';
 
 const SignUp = () => {
     const { signUpWithGoogle, user, loading, error: authError } = useContext(AuthContext);
     const navigate = useNavigate();
     const [isLoading, setIsLoading] = useState(false);
-    const [error, setError] = useState(null);
     const [isSidebarOpen, setIsSidebarOpen] = useState(false);
     const [selectedRole, setSelectedRole] = useState(null);
 
@@ -25,23 +26,29 @@ const SignUp = () => {
         }
     }, [user, loading, navigate]);
 
-    // Clear error when role changes
-    useEffect(() => {
-        if (error) {
-            setError(null);
-        }
-    }, [selectedRole]);
+    const showErrorToast = (message, options = {}) => {
+        toast.error(message, {
+            position: "top-center",
+            autoClose: 5000,
+            hideProgressBar: false,
+            closeOnClick: true,
+            pauseOnHover: true,
+            draggable: true,
+            progress: undefined,
+            theme: "dark",
+            ...options
+        });
+    };
 
     const handleGoogleSignUp = async () => {
         if (isLoading || !selectedRole) {
             if (!selectedRole) {
-                setError('Please select your role first');
+                showErrorToast('Please select your role first');
             }
             return;
         }
 
         setIsLoading(true);
-        setError(null);
 
         try {
             const controller = new AbortController();
@@ -61,13 +68,39 @@ const SignUp = () => {
             }
         } catch (error) {
             if (error.name === 'AbortError') {
-                setError('Request timed out. Please try again.');
+                showErrorToast('Request timed out. Please try again.');
             } else if (error.message && error.message.includes('already exists')) {
-                setError('Account already exists. Please try logging in instead.');
+                showErrorToast('Account already exists. Please try logging in instead.', {
+                    autoClose: 7000,
+                    render: (
+                        <div>
+                            <div>{error.message || 'Account already exists. Please try logging in instead.'}</div>
+                            <Link 
+                                to="/login" 
+                                className="text-blue-300 hover:text-blue-200 underline mt-1 inline-block"
+                            >
+                                Login to your account
+                            </Link>
+                        </div>
+                    )
+                });
             } else if (error.status === 409) {
-                setError('Account already exists. Please try logging in instead.');
+                showErrorToast('Account already exists. Please try logging in instead.', {
+                    autoClose: 7000,
+                    render: (
+                        <div>
+                            <div>Account already exists. Please try logging in instead.</div>
+                            <Link 
+                                to="/login" 
+                                className="text-blue-300 hover:text-blue-200 underline mt-1 inline-block"
+                            >
+                                Login to your account
+                            </Link>
+                        </div>
+                    )
+                });
             } else {
-                setError(error.message || 'Signup failed. Please try again.');
+                showErrorToast(error.message || 'Signup failed. Please try again.');
             }
         } finally {
             setIsLoading(false);
@@ -77,12 +110,26 @@ const SignUp = () => {
     // Show auth error if any
     useEffect(() => {
         if (authError) {
-            setError(authError);
+            showErrorToast(authError);
         }
     }, [authError]);
 
     return (
         <div className="min-h-screen bg-black text-white flex">
+            {/* Toast Container */}
+            <ToastContainer
+                position="top-center"
+                autoClose={5000}
+                hideProgressBar={false}
+                newestOnTop={false}
+                closeOnClick
+                rtl={false}
+                pauseOnFocusLoss
+                draggable
+                pauseOnHover
+                theme="dark"
+            />
+
             <div className="sticky top-0 h-screen bg-black">
                 <Sidebar isOpen={isSidebarOpen} onToggle={() => setIsSidebarOpen(!isSidebarOpen)} />
             </div>
@@ -100,25 +147,6 @@ const SignUp = () => {
                                 Join Pravesh
                             </h1>
                             <p className="text-center text-gray-400 mb-8">Create an account to start your journey</p>
-
-                            {error && (
-                                <div className="mb-6 p-3 rounded-lg bg-red-900/50 border border-red-800 text-red-200 flex items-start">
-                                    <svg className="w-5 h-5 mr-2 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>
-                                    </svg>
-                                    <div className="text-sm">
-                                        <p>{error}</p>
-                                        {error.includes('already exists') && (
-                                            <Link 
-                                                to="/login" 
-                                                className="text-blue-300 hover:text-blue-200 underline mt-1 inline-block"
-                                            >
-                                                Login to your account
-                                            </Link>
-                                        )}
-                                    </div>
-                                </div>
-                            )}
 
                             <div className="space-y-6">
                                 {/* Role Selection */}

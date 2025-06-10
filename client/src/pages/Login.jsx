@@ -4,12 +4,13 @@ import { FcGoogle } from 'react-icons/fc';
 import { useNavigate, Link } from 'react-router-dom';
 import { ArrowRight } from 'lucide-react';
 import Sidebar from "../components/Sidebar";
+import { ToastContainer, toast } from 'react-toastify';
+import 'react-toastify/dist/ReactToastify.css';
 
 const Login = () => {
   const { signInWithGoogle, user, loading, error: authError } = useContext(AuthContext);
   const navigate = useNavigate();
   const [isLoading, setIsLoading] = useState(false);
-  const [error, setError] = useState(null);
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [selectedRole, setSelectedRole] = useState(null);
 
@@ -20,28 +21,34 @@ const Login = () => {
       if (role === 'requester') {
         navigate('/requester-dashboard', { replace: true });
       } else if (role === 'applicant') {
-        navigate('/applicant-dashboard', { replace: true });
+        navigate('/dashboard', { replace: true });
       }
     }
   }, [user, loading, navigate]);
 
-  // Clear error when role changes
-  useEffect(() => {
-    if (error) {
-      setError(null);
-    }
-  }, [selectedRole]);
+  const showErrorToast = (message, options = {}) => {
+    toast.error(message, {
+      position: "top-center",
+      autoClose: 5000,
+      hideProgressBar: false,
+      closeOnClick: true,
+      pauseOnHover: true,
+      draggable: true,
+      progress: undefined,
+      theme: "dark",
+      ...options
+    });
+  };
 
   const handleGoogleSignIn = async () => {
     if (isLoading || !selectedRole) {
       if (!selectedRole) {
-        setError('Please select your role first');
+        showErrorToast('Please select your role first');
       }
       return;
     }
 
     setIsLoading(true);
-    setError(null);
 
     try {
       const controller = new AbortController();
@@ -55,15 +62,30 @@ const Login = () => {
       clearTimeout(timeoutId);
     } catch (error) {
       if (error.name === 'AbortError') {
-        setError('Request timed out. Please try again.');
+        showErrorToast('Request timed out. Please try again.');
       } else if (error.needsSignup) {
-        setError('Account not found. Please sign up first or try with a different role.');
+        showErrorToast('Account not found. Please sign up first or try with a different role.', {
+          autoClose: 7000,
+          render: (
+            <div>
+              <div>{error.message || 'Account not found. Please sign up first or try with a different role.'}</div>
+              <Link 
+                to="/signup" 
+                className="text-blue-300 hover:text-blue-200 underline mt-1 inline-block"
+              >
+                Create an account instead
+              </Link>
+            </div>
+          )
+        });
       } else if (error.message && error.message.includes('different role')) {
         const roleMatch = error.message.match(/registered as (\w+)/);
         const actualRole = roleMatch ? roleMatch[1] : 'different role';
-        setError(`Account exists with ${actualRole} role. Please select the correct role or sign up with a new account.`);
+        showErrorToast(`Account exists with ${actualRole} role. Please select the correct role or sign up with a new account.`, {
+          autoClose: 7000
+        });
       } else {
-        setError(error.message || 'Login failed. Please try again.');
+        showErrorToast(error.message || 'Login failed. Please try again.');
       }
     } finally {
       setIsLoading(false);
@@ -73,12 +95,26 @@ const Login = () => {
   // Show auth error if any
   useEffect(() => {
     if (authError) {
-      setError(authError);
+      showErrorToast(authError);
     }
   }, [authError]);
 
   return (
     <div className="min-h-screen bg-black text-white flex">
+      {/* Toast Container */}
+      <ToastContainer
+        position="top-center"
+        autoClose={5000}
+        hideProgressBar={false}
+        newestOnTop={false}
+        closeOnClick
+        rtl={false}
+        pauseOnFocusLoss
+        draggable
+        pauseOnHover
+        theme="dark"
+      />
+
       <div className="sticky top-0 h-screen bg-black">
         <Sidebar isOpen={isSidebarOpen} onToggle={() => setIsSidebarOpen(!isSidebarOpen)} />
       </div>
@@ -96,25 +132,6 @@ const Login = () => {
                 Welcome Back
               </h1>
               <p className="text-center text-gray-400 mb-8">Sign in to continue your Pravesh journey</p>
-
-              {error && (
-                <div className="mb-6 p-3 rounded-lg bg-red-900/50 border border-red-800 text-red-200 flex items-start">
-                  <svg className="w-5 h-5 mr-2 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>
-                  </svg>
-                  <div className="text-sm">
-                    <p>{error}</p>
-                    {error.includes('Account not found') && (
-                      <Link 
-                        to="/signup" 
-                        className="text-blue-300 hover:text-blue-200 underline mt-1 inline-block"
-                      >
-                        Create an account instead
-                      </Link>
-                    )}
-                  </div>
-                </div>
-              )}
 
               <div className="space-y-6">
                 {/* Role Selection */}
