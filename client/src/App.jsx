@@ -1,62 +1,43 @@
-import React from 'react';
-import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
-import { AuthProvider } from './context/AuthContext';
-import Login from './pages/Login';
-import Profile from './pages/Profile';
-import ProtectedRoute from './components/ProtectedRoute';
-import Landing from './pages/LandingPage';
-import SignUp from './pages/SignUp';
-import ApplicantDashboard from './pages/Dashboard/ApplicantDashboard';
-import JobPostingForm from './pages/Recruiter/JobPostingFrom';
-import ViewJobApplications from './pages/Recruiter/ViewJobApplications';
+import { BrowserRouter as Router, Routes, Route } from 'react-router-dom';
+import Home from './pages/Home';
+import LoginPage from './pages/LoginPage';
+import SignupPage from './pages/SignupPage';
+import ApplicantDashboard from './pages/ApplicantDashboard';
+import RequesterDashboard from './pages/RequesterDashboard';
+import JobBoard from './pages/JobBoard';
+import ProfilePage from './pages/ProfilePage';
+import Navbar from './components/Navbar';
+import Footer from './components/Footer';
+import ProtectedRoute from './components/Auth/ProtectedRoute';
 
-const App = () => {
+function App() {
   return (
-    <AuthProvider>
-      <Router>
-        <Routes>
-          <Route path="/login" element={<Login />} />
-          <Route path='/signup' element={<SignUp />} />
-          <Route path='/home' element={<Landing />} />
-
-          <Route
-            path="/profile"
-            element={
-              <ProtectedRoute>
-                <Profile />
-              </ProtectedRoute>
-            }
-          />
-          <Route
-            path='/dashboard'
-            element={
-              <ProtectedRoute >  
-                <ApplicantDashboard />
-              </ProtectedRoute>
-            }
-          />
-          <Route
-            path="/post-job"
-            element={
-              <ProtectedRoute >
-                <JobPostingForm />
-              </ProtectedRoute>
-            }
-          />
-          <Route
-            path="/my-jobs"
-            element={
-              <ProtectedRoute >
-                <ViewJobApplications />
-              </ProtectedRoute>
-            }
-          />
-
-          <Route path="/" element={<Navigate to="/profile" replace />} />
-        </Routes>
-      </Router>
-    </AuthProvider>
+    <Router>
+      <div className="flex flex-col min-h-screen">
+        <Navbar />
+        <main className="flex-grow container mx-auto px-4 py-8">
+          <Routes>
+            <Route path="/" element={<Home />} />
+            <Route path="/login" element={<LoginPage />} />
+            <Route path="/signup" element={<SignupPage />} />
+            
+            {/* Protected routes */}
+            <Route element={<ProtectedRoute role="applicant" />}>
+              <Route path="/applicant" element={<ApplicantDashboard />} />
+            </Route>
+            
+            <Route element={<ProtectedRoute role="requester" />}>
+              <Route path="/requester" element={<RequesterDashboard />} />
+            </Route>
+            
+            <Route path="/jobs" element={<JobBoard />} />
+            <Route path="/profile" element={<ProfilePage />} />
+          </Routes>
+        </main>
+        <Footer />
+      </div>
+    </Router>
   );
-};
+}
 
 export default App;

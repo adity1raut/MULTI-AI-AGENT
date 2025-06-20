@@ -1,11 +1,13 @@
 import React from 'react';
 import ReactDOM from 'react-dom/client';
-import App from './App.jsx';
-import "./index.css"
+import App from './App';
+import './index.css';
+import { AuthProvider } from "./utils/auth.jsx";
 
 ReactDOM.createRoot(document.getElementById('root')).render(
-  // Remove StrictMode in development if it's causing issues
-  // <React.StrictMode>
-    <App />
-  // </React.StrictMode>
+  <React.StrictMode>
+    <AuthProvider>
+      <App />
+    </AuthProvider>
+  </React.StrictMode>
 );
